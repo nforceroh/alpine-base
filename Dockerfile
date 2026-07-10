@@ -1,9 +1,9 @@
-FROM alpine:3.23
+FROM alpine:3.24
 
 ARG \
   BUILD_DATE=now \
   VERSION=unknown \
-  S6_OVERLAY_VERSION=3.2.2.0 \
+  S6_OVERLAY_VERSION=3.2.3.0 \
   S6_OVERLAY_ARCH=x86_64
 
 LABEL \

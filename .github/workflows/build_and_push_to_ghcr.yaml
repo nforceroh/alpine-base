@@ -21,8 +21,8 @@ jobs:
         run: echo "BUILD_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
       - name: Get Alpine base digest
         run: |
-          docker pull alpine:3.23
-          ALPINE_REPO_DIGEST=$(docker image inspect alpine:3.23 --format '{{index .RepoDigests 0}}')
+          docker pull alpine:3.24
+          ALPINE_REPO_DIGEST=$(docker image inspect alpine:3.24 --format '{{index .RepoDigests 0}}')
           ALPINE_DIGEST=${ALPINE_REPO_DIGEST##*@}
           ALPINE_DIGEST_SHORT=${ALPINE_DIGEST#sha256:}
           ALPINE_DIGEST_SHORT=${ALPINE_DIGEST_SHORT:0:12}
@@ -62,8 +62,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_DATE }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:3.23
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:3.23-${{ env.ALPINE_DIGEST_SHORT }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:3.24
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:3.24-${{ env.ALPINE_DIGEST_SHORT }}
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
