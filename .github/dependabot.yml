@@ -1,11 +1,20 @@
 version: 2
 updates:
-  # Enable updates for Docker dependencies
+  # Keep the Alpine base image current
   - package-ecosystem: "docker"
-    directory: "/" # Location of your Dockerfile
+    directory: "/"
     schedule:
-      interval: "daily" # Check for updates every day
-    # Optional: Pin updates to only allow minor/patch changes if desired
+      interval: "daily"
     ignore:
       - dependency-name: "alpine"
-        versions: [">= 4.0.0"] 
+        versions: [">= 4.0.0"]
+
+  # Keep GitHub Actions pinned versions current
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
