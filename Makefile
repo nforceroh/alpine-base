@@ -1,51 +1,16 @@
-#!/usr/bin/make -f
-
+# Local build and test only — CI is the sole publisher.
+# Shared pipelines: https://github.com/nforceroh/.github
 SHELL := /bin/bash
-IMG_NAME := k8s-alpine-baseimage
-IMG_REPO := nforceroh
-DOCKERCMD := docker
-IMG_TAG ?= $(IMG_REPO)/$(IMG_NAME)
-ALPINE_VERSION := $(shell sed -n 's/^FROM[[:space:]]\+alpine:\([0-9][0-9.]*\).*/\1/p' Dockerfile | head -n1)
+IMAGE ?= ghcr.io/nforceroh/alpine-base
+TAG   ?= dev
 
-.PHONY: all build push test gitcommit gitpush create
-all: build push 
-git: gitcommit gitpush 
+.PHONY: build test
 
-build: 
-	@echo "Building $(IMG_NAME)image"
-	$(DOCKERCMD) build \
-		--tag $(IMG_REPO)/$(IMG_NAME) .
+build:
+	docker build \
+		--build-arg BUILD_DATE="$(shell date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+		--build-arg VERSION="$(TAG)" \
+		--tag $(IMAGE):$(TAG) .
 
-test:
-	@echo "=== [1/7] Basic startup ==="
-	$(DOCKERCMD) run --rm $(IMG_TAG) echo "OK"
-
-	@echo "=== [2/7] s6 services listed ==="
-	$(DOCKERCMD) run --rm $(IMG_TAG) /command/s6-rc -a list
-
-	@echo "=== [3/7] Default user (abc) created ==="
-	$(DOCKERCMD) run --rm $(IMG_TAG) id abc
-
-	@echo "=== [4/7] Custom PUID/PGID ==="
-	$(DOCKERCMD) run --rm -e PUID=1500 -e PGID=1500 $(IMG_TAG) id abc
-
-	@echo "=== [5/7] Timezone applied ==="
-	$(DOCKERCMD) run --rm -e TZ=Europe/Paris $(IMG_TAG) \
-		sh -c "cat /etc/timezone && readlink /etc/localtime"
-
-	@echo "=== [6/7] Required directories exist ==="
-	$(DOCKERCMD) run --rm $(IMG_TAG) ls -la /app /config /defaults
-
-	@echo "=== [7/7] Key tools present ==="
-	$(DOCKERCMD) run --rm $(IMG_TAG) \
-		sh -c "jq --version && curl --version | head -1 && openssl version && bash --version | head -1"
-
-	@echo "All tests passed!"
-
-push: 
-	@echo "Tagging and Pushing $(IMG_NAME):$(VERSION) image"
-	$(DOCKERCMD) tag $(IMG_REPO)/$(IMG_NAME) docker.io/$(IMG_REPO)/$(IMG_NAME):$(ALPINE_VERSION)
-	$(DOCKERCMD) push docker.io/$(IMG_REPO)/$(IMG_NAME):$(ALPINE_VERSION)
-
-end:
-	@echo "Done!"
+test: build
+	./tests/run_tests.sh "$(IMAGE):$(TAG)"

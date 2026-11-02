@@ -12,7 +12,7 @@ LABEL \
   org.label-schema.maintainer="Sylvain Martin (sylvain@nforcer.com)" \
   org.label-schema.build-date="${BUILD_DATE}" \
   org.label-schema.version="${VERSION}" \
-  org.label-schema.vcs-url="https://github.com/nforcer/k8s-alpine-baseimage" \
+  org.label-schema.vcs-url="https://github.com/nforceroh/alpine-base" \
   org.label-schema.vcs-ref="${VERSION}" \
   org.label-schema.schema-version="1.0"
   
