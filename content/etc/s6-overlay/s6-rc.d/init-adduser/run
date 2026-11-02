@@ -1,21 +1,21 @@
 #!/command/with-contenv bash
 
-UID=${UID:-abc}
+APP_USER=${APP_USER:-abc}
 PUID=${PUID:-3001}
 PGID=${PGID:-3000}
 
-echo "Checking for ${UID} user"
+echo "Checking for ${APP_USER} user"
 
-  # If the ${UID} user already exists with the expected UID/GID (e.g. set up by a
+  # If the ${APP_USER} user already exists with the expected UID/GID (e.g. set up by a
 # derived image), skip creation and ownership changes entirely.
-if id "${UID}" &>/dev/null \
-    && [ "$(id -u "${UID}")" = "${PUID}" ] \
-    && [ "$(id -g "${UID}")" = "${PGID}" ]; then
-  echo "${UID} user already exists with correct UID/GID, skipping init"
+if id "${APP_USER}" &>/dev/null \
+    && [ "$(id -u "${APP_USER}")" = "${PUID}" ] \
+    && [ "$(id -g "${APP_USER}")" = "${PGID}" ]; then
+  echo "${APP_USER} user already exists with correct UID/GID, skipping init"
 else
   # Keep startup non-fatal if user/group already exists or cannot be recreated.
-  /usr/sbin/addgroup -g "${PGID}" "${UID}" 2>/dev/null || echo "${UID} group already exists or could not be created"
-  /usr/sbin/adduser -D -u "${PUID}" -G "${UID}" -h /app -g "App User" "${UID}" 2>/dev/null || echo "${UID} user already exists or could not be created"
+  /usr/sbin/addgroup -g "${PGID}" "${APP_USER}" 2>/dev/null || echo "${APP_USER} group already exists or could not be created"
+  /usr/sbin/adduser -D -u "${PUID}" -G "${APP_USER}" -h /app -g "App User" "${APP_USER}" 2>/dev/null || echo "${APP_USER} user already exists or could not be created"
 
   for directory in /app /config /defaults; do
     if [ ! -d "${directory}" ]; then
@@ -24,13 +24,13 @@ else
     fi
 
     echo "Ensuring ownership for: ${directory}"
-    chown -R "${UID}:${UID}" "${directory}"
+    chown -R "${APP_USER}:${APP_USER}" "${directory}"
   done
 fi
 
 echo "
 ───────────────────────────────────────
-User UID:    $(id -u "${UID}")
-User GID:    $(id -g "${UID}")
+User UID:    $(id -u "${APP_USER}")
+User GID:    $(id -g "${APP_USER}")
 ───────────────────────────────────────
 "

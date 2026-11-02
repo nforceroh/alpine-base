@@ -3,8 +3,10 @@ FROM alpine:3.24
 ARG \
   BUILD_DATE=now \
   VERSION=unknown \
-  S6_OVERLAY_VERSION=3.2.3.0 \
-  S6_OVERLAY_ARCH=x86_64
+  S6_OVERLAY_VERSION=3.2.3.2
+
+# Docker sets TARGETARCH during multi-platform builds; default to amd64 for plain builds.
+ARG TARGETARCH=amd64
 
 LABEL \
   org.label-schema.maintainer="Sylvain Martin (sylvain@nforcer.com)" \
@@ -30,7 +32,14 @@ RUN \
   && rm -rf /var/cache/apk/*
 
 RUN \
-  echo "**** Downloading S6 overlay v${S6_OVERLAY_VERSION} for ${S6_OVERLAY_ARCH} ****" \
+  case "${TARGETARCH}" in \
+    amd64) S6_OVERLAY_ARCH=x86_64 ;; \
+    arm64) S6_OVERLAY_ARCH=aarch64 ;; \
+    arm)   S6_OVERLAY_ARCH=armhf ;; \
+    386)   S6_OVERLAY_ARCH=i686 ;; \
+    *)     echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+  esac \
+  && echo "**** Downloading S6 overlay v${S6_OVERLAY_VERSION} for ${S6_OVERLAY_ARCH} ****" \
   && mkdir -p /tmp/s6 && cd /tmp/s6 \
   && curl --location --silent --fail https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-noarch.tar.xz -o s6-overlay-noarch.tar.xz \
   && curl --location --silent --fail https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${S6_OVERLAY_ARCH}.tar.xz -o s6-overlay-arch.tar.xz \
