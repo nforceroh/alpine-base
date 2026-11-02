@@ -2,69 +2,296 @@ name: Docker Image for GHCR
 
 on:
   push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  schedule:
+    # Daily: rebuild when the Alpine base image digest changes.
+    - cron: "23 5 * * *"
+    # Weekly (Mon 06:23 UTC): forced rebuild to pick up patched Alpine packages.
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.event.repository.name }}
 
 jobs:
-  deploy-docker-image:
+  check:
+    name: Check for base image update
     runs-on: ubuntu-latest
-  
+    timeout-minutes: 5
+
+    permissions:
+      contents: read
+      packages: read
+      issues: write
+
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      force_rebuild: ${{ steps.check.outputs.force_rebuild }}
+      alpine_version: ${{ steps.check.outputs.alpine_version }}
+      newer_minor: ${{ steps.check.outputs.newer_minor }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare upstream Alpine digest with published image
+        id: check
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          ALPINE_VERSION=$(grep -oP '^FROM\s+alpine:\K[0-9]+\.[0-9]+(\.[0-9]+)?' Dockerfile | head -n1)
+          if [ -z "${ALPINE_VERSION}" ]; then
+            echo "::error::Could not determine Alpine version from Dockerfile"
+            exit 1
+          fi
+          echo "alpine_version=${ALPINE_VERSION}" >> "$GITHUB_OUTPUT"
+
+          HUB_TOKEN=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" | jq -r .token)
+
+          # --- Detect a newer Alpine minor release (e.g. 3.24 -> 3.25) ---
+          PINNED_MINOR=$(echo "${ALPINE_VERSION}" | cut -d. -f1,2)
+          LATEST_MINOR=$(curl -fsSL -H "Authorization: Bearer ${HUB_TOKEN}" \
+            "https://registry-1.docker.io/v2/library/alpine/tags/list?n=10000" \
+            | jq -r '.tags[]' \
+            | grep -oP '^3\.\d+$' \
+            | sort -t. -k2 -n \
+            | tail -n1)
+          echo "Pinned minor: ${PINNED_MINOR} | Latest minor: ${LATEST_MINOR}"
+
+          if [ "${PINNED_MINOR}" != "${LATEST_MINOR}" ] \
+             && [ "$(printf '%s\n%s\n' "${PINNED_MINOR}" "${LATEST_MINOR}" | sort -t. -k2 -n | tail -n1)" = "${LATEST_MINOR}" ]; then
+            echo "newer_minor=${LATEST_MINOR}" >> "$GITHUB_OUTPUT"
+          else
+            echo "newer_minor=" >> "$GITHUB_OUTPUT"
+          fi
+
+          # --- Decide whether to build ---
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "Trigger is '${{ github.event_name }}', building unconditionally."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "force_rebuild=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "${{ github.event.schedule }}" = "23 6 * * 1" ]; then
+            echo "Weekly forced rebuild: refreshing Alpine packages."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            echo "force_rebuild=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          UPSTREAM_DIGEST=$(curl -fsSI \
+            -H "Authorization: Bearer ${HUB_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            "https://registry-1.docker.io/v2/library/alpine/manifests/${ALPINE_VERSION}" \
+            | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}' | tr -d '\r')
+
+          if [ -z "${UPSTREAM_DIGEST}" ]; then
+            echo "::error::Could not resolve upstream digest for alpine:${ALPINE_VERSION}"
+            exit 1
+          fi
+
+          SHORT=${UPSTREAM_DIGEST#sha256:}
+          SHORT=${SHORT:0:12}
+          TAG="${ALPINE_VERSION}-${SHORT}"
+          echo "Upstream alpine:${ALPINE_VERSION} digest is ${UPSTREAM_DIGEST} (tag ${TAG})"
+
+          # Authenticated pull token; falls back to anonymous for public packages.
+          TOKEN_URL="https://ghcr.io/token?scope=repository:${{ github.repository_owner }}/${IMAGE_NAME}:pull&service=ghcr.io"
+          GHCR_TOKEN=$(curl -fsSL -H "Authorization: Bearer ${REGISTRY_TOKEN}" "${TOKEN_URL}" | jq -r .token 2>/dev/null || true)
+          if [ -z "${GHCR_TOKEN}" ] || [ "${GHCR_TOKEN}" = "null" ]; then
+            GHCR_TOKEN=$(curl -fsSL "${TOKEN_URL}" | jq -r .token)
+          fi
+
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.list.v2+json" \
+            -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+            "https://${REGISTRY}/v2/${{ github.repository_owner }}/${IMAGE_NAME}/manifests/${TAG}")
+
+          echo "force_rebuild=false" >> "$GITHUB_OUTPUT"
+          if [ "${STATUS}" = "200" ]; then
+            echo "Image ${TAG} already published; nothing to do."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image ${TAG} not published (HTTP ${STATUS}); rebuild required."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue for newer Alpine minor release
+        if: steps.check.outputs.newer_minor != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEWER_MINOR: ${{ steps.check.outputs.newer_minor }}
+          PINNED: ${{ steps.check.outputs.alpine_version }}
+        run: |
+          set -euo pipefail
+
+          gh label create alpine-update \
+            --color "0E8A16" \
+            --description "New Alpine Linux release available" \
+            --force >/dev/null 2>&1 || true
+
+          EXISTING=$(gh issue list \
+            --state open \
+            --label alpine-update \
+            --search "Alpine ${NEWER_MINOR} in:title" \
+            --json number \
+            --jq 'length')
+
+          if [ "${EXISTING}" -gt 0 ]; then
+            echo "An open issue for Alpine ${NEWER_MINOR} already exists; skipping."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Update base image to Alpine ${NEWER_MINOR}" \
+            --label alpine-update \
+            --body "$(cat <<EOF
+          Alpine **${NEWER_MINOR}** is now available on Docker Hub, but this image is pinned to **${PINNED}**.
+
+          ### Update
+
+          \`\`\`diff
+          -FROM alpine:${PINNED}
+          +FROM alpine:${NEWER_MINOR}
+          \`\`\`
+
+          Then bump the version in \`.github/dependabot.yml\` if it references a specific minor.
+
+          ### Checklist
+
+          - [ ] Update \`FROM\` in \`Dockerfile\`
+          - [ ] Run \`make build && make test\` locally
+          - [ ] Verify s6-overlay still starts cleanly
+          - [ ] Merge and confirm the image publishes
+
+          _Opened automatically by the scheduled base-image check._
+          EOF
+          )"
+
+  test:
+    name: Build and smoke test
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          no-cache: ${{ needs.check.outputs.force_rebuild == 'true' }}
+          tags: k8s-alpine-baseimage:ci
+          build-args: |
+            BUILD_DATE=${{ github.run_id }}
+            VERSION=${{ github.sha }}
+
+      - name: Run smoke tests
+        run: make test IMG_TAG=k8s-alpine-baseimage:ci
+
+  deploy-docker-image:
+    name: Build and push
+    needs: [check, test]
+    if: needs.check.outputs.should_build == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     permissions:
       contents: read
       packages: write
       attestations: write
-      id-token: write  
+      id-token: write
 
     steps:
-      - name: Get repo name
-        run: echo "IMAGE_NAME=$(echo ${{ github.repository }} | cut -d'/' -f2)" >> $GITHUB_ENV
+      - uses: actions/checkout@v7
+
       - name: Set build date
-        id: date
-        run: echo "BUILD_DATE=$(date +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
-      - name: Get Alpine base digest
+        run: echo "BUILD_DATE=$(date -u +'%Y%m%d%H%M%S')" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Resolve Alpine base digest
         run: |
-          docker pull alpine:3.24
-          ALPINE_REPO_DIGEST=$(docker image inspect alpine:3.24 --format '{{index .RepoDigests 0}}')
-          ALPINE_DIGEST=${ALPINE_REPO_DIGEST##*@}
+          ALPINE_VERSION="${{ needs.check.outputs.alpine_version }}"
+          ALPINE_DIGEST=$(docker buildx imagetools inspect "alpine:${ALPINE_VERSION}" | awk '/^Digest:/ {print $2; exit}')
+          if [ -z "${ALPINE_DIGEST}" ]; then
+            echo "::error::Could not resolve digest for alpine:${ALPINE_VERSION}"
+            exit 1
+          fi
           ALPINE_DIGEST_SHORT=${ALPINE_DIGEST#sha256:}
           ALPINE_DIGEST_SHORT=${ALPINE_DIGEST_SHORT:0:12}
-          echo "ALPINE_DIGEST=${ALPINE_DIGEST}" >> $GITHUB_ENV
-          echo "ALPINE_DIGEST_SHORT=${ALPINE_DIGEST_SHORT}" >> $GITHUB_ENV
+          {
+            echo "ALPINE_VERSION=${ALPINE_VERSION}"
+            echo "ALPINE_DIGEST=${ALPINE_DIGEST}"
+            echo "ALPINE_DIGEST_SHORT=${ALPINE_DIGEST_SHORT}"
+          } >> "$GITHUB_ENV"
+
       - name: Variables defined
         run: |
-          echo "IMAGE_NAME              = ${{ env.IMAGE_NAME }}"
-          echo "BUILD_DATE              = ${{ env.BUILD_DATE }}"
-          echo "ALPINE_DIGEST           = ${{ env.ALPINE_DIGEST }}"
+          echo "IMAGE_NAME              = ${IMAGE_NAME}"
+          echo "BUILD_DATE              = ${BUILD_DATE}"
+          echo "ALPINE_VERSION          = ${ALPINE_VERSION}"
+          echo "ALPINE_DIGEST           = ${ALPINE_DIGEST}"
+          echo "FORCE_REBUILD           = ${{ needs.check.outputs.force_rebuild }}"
           echo "github.repository_owner = ${{ github.repository_owner }}"
-      - run: echo "Starting build for ${{ github.repository }}"
-      - uses: actions/checkout@v3
+
       - name: Extract metadata (tags, labels) for Docker
         id: meta
-        uses: docker/metadata-action@v4
+        uses: docker/metadata-action@v6
         with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern=version
+            type=raw,value=${{ env.BUILD_DATE }}
+            type=raw,value=${{ env.ALPINE_VERSION }}
+            type=raw,value=${{ env.ALPINE_VERSION }}-${{ env.ALPINE_DIGEST_SHORT }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
-            type=schedule,pattern={{date 'YYYYMMDD-hhmmss' tz='US/Eastern'}}
-          images: ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}     
+
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}     
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
+          context: .
           pull: true
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.BUILD_DATE }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:3.24
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:3.24-${{ env.ALPINE_DIGEST_SHORT }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+          push: true
+          no-cache: ${{ needs.check.outputs.force_rebuild == 'true' }}
+          provenance: true
+          sbom: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             BUILD_DATE=${{ env.BUILD_DATE }}
