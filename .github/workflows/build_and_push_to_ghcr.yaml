@@ -61,17 +61,17 @@ jobs:
           HUB_TOKEN=$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull" | jq -r .token)
 
           # --- Detect a newer Alpine minor release (e.g. 3.24 -> 3.25) ---
+          # Use the Alpine CDN: the Docker Hub tags API paginates and silently
+          # truncates, which made this report a stale minor (3.9) as "latest".
           PINNED_MINOR=$(echo "${ALPINE_VERSION}" | cut -d. -f1,2)
-          LATEST_MINOR=$(curl -fsSL -H "Authorization: Bearer ${HUB_TOKEN}" \
-            "https://registry-1.docker.io/v2/library/alpine/tags/list?n=10000" \
-            | jq -r '.tags[]' \
-            | grep -oP '^3\.\d+$' \
-            | sort -t. -k2 -n \
+          LATEST_MINOR=$(curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/" \
+            | grep -oP 'v\K3\.\d+(?=/)' \
+            | sort -u -V \
             | tail -n1)
-          echo "Pinned minor: ${PINNED_MINOR} | Latest minor: ${LATEST_MINOR}"
+          echo "Pinned minor: ${PINNED_MINOR} | Latest minor: ${LATEST_MINOR:-<unknown>}"
 
-          if [ "${PINNED_MINOR}" != "${LATEST_MINOR}" ] \
-             && [ "$(printf '%s\n%s\n' "${PINNED_MINOR}" "${LATEST_MINOR}" | sort -t. -k2 -n | tail -n1)" = "${LATEST_MINOR}" ]; then
+          if [ -n "${LATEST_MINOR}" ] && [ "${PINNED_MINOR}" != "${LATEST_MINOR}" ] \
+             && [ "$(printf '%s\n%s\n' "${PINNED_MINOR}" "${LATEST_MINOR}" | sort -V | tail -n1)" = "${LATEST_MINOR}" ]; then
             echo "newer_minor=${LATEST_MINOR}" >> "$GITHUB_OUTPUT"
           else
             echo "newer_minor=" >> "$GITHUB_OUTPUT"
