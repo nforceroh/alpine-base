@@ -64,6 +64,40 @@ check_output "PUID/PGID are honoured" 'uid=1500\(abc\) gid=1500' \
 check "init creates /app, /config and /defaults" \
 	in_image sh -c 'test -d /app && test -d /config && test -d /defaults'
 
+# --- collision regression ---------------------------------------------------
+# A derived image that bakes a user at PUID/PGID must be adopted, not collided
+# with: addgroup -g $PGID fails with "gid in use", adduser -G then fails with
+# "unknown group", and the chown targets a user that was never created. This is
+# the relayer/dcc failure mode; guard it here so the base never regresses.
+# The container is booted detached (init never exits) and its logs read after a
+# settle window, same pattern as the boot check below.
+BOOT_NAME="smoke-bake-$$-$RANDOM"
+docker run -d --name "$BOOT_NAME" -e PUID=3001 -e PGID=3000 --entrypoint sh "$IMAGE" \
+	-c 'addgroup -g 3000 baked 2>/dev/null; adduser -D -u 3001 -G baked baked 2>/dev/null; exec /init' >/dev/null 2>&1
+sleep "$SETTLE_SECONDS"
+BOOT_LOGS=$(docker logs "$BOOT_NAME" 2>&1)
+docker rm -f "$BOOT_NAME" >/dev/null 2>&1
+
+check_grep() {
+	local label="$1" pattern="$2" haystack="$3"
+	if grep -qE -- "$pattern" <<<"$haystack"; then
+		echo -e "  ${GREEN}PASS${NC}  ${label}"
+		PASS=$((PASS + 1))
+	else
+		echo -e "  ${RED}FAIL${NC}  ${label}"
+		FAIL=$((FAIL + 1))
+	fi
+}
+check_grep "baked user at PUID is adopted" 'baked user already exists with correct UID/GID' "$BOOT_LOGS"
+check_grep "adopted user is used for the summary" 'User UID:    3001' "$BOOT_LOGS"
+if grep -qE 'gid .in use|unknown group' <<<"$BOOT_LOGS"; then
+	echo -e "  ${RED}FAIL${NC}  collision errors in the log (addgroup/adduser fought the baked user)"
+	FAIL=$((FAIL + 1))
+else
+	echo -e "  ${GREEN}PASS${NC}  no collision errors in the log"
+	PASS=$((PASS + 1))
+fi
+
 # --- timezone ---------------------------------------------------------------
 check_output "TZ is applied" '/zoneinfo/Europe/Paris' \
 	-e TZ=Europe/Paris -- readlink /etc/localtime

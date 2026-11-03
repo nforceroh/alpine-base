@@ -4,6 +4,15 @@ APP_USER=${APP_USER:-abc}
 PUID=${PUID:-3001}
 PGID=${PGID:-3000}
 
+# Adopt a user the derived image already baked in at $PUID (e.g. relayer, dcc)
+# instead of inventing a second one. Without this, addgroup -g $PGID fails with
+# "gid in use", adduser -G then fails with "unknown group", and the chown below
+# targets a user that was never created.
+BAKED_USER=$(getent passwd "$PUID" | cut -d: -f1)
+if [ -n "$BAKED_USER" ]; then
+  APP_USER="$BAKED_USER"
+fi
+
 echo "Checking for ${APP_USER} user"
 
   # If the ${APP_USER} user already exists with the expected UID/GID (e.g. set up by a
@@ -24,9 +33,21 @@ else
     fi
 
     echo "Ensuring ownership for: ${directory}"
-    chown -R "${APP_USER}:${APP_USER}" "${directory}"
+    # Ownership is the whole point of this service: fail loudly rather than
+    # boot with /app owned by root and nobody the wiser.
+    chown -R "${APP_USER}:${APP_USER}" "${directory}" || {
+      echo "ERROR: chown failed for ${directory} (${APP_USER}:${APP_USER})" >&2
+      exit 1
+    }
   done
 fi
+
+echo "
+───────────────────────────────────────
+User UID:    $(id -u "${APP_USER}")
+User GID:    $(id -g "${APP_USER}")
+───────────────────────────────────────
+"
 
 echo "
 ───────────────────────────────────────
